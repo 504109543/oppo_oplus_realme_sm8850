@@ -653,6 +653,10 @@ jobs:
           export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump OBJSIZE=llvm-size STRIP=llvm-strip
           # 5. 编译前运行官方环境配置脚本
           source "./_setup_env.sh" 2>/dev/null || true
+
+          # 与 FAKETIME 对齐，伪造成 2025-05-25
+          export SOURCE_DATE_EPOCH=$(date -d "2025-05-25 13:00:00" +%s)
+          export KBUILD_BUILD_TIMESTAMP="Sun May 25 13:00:00 UTC 2025"
           
           #在构建内核的同时清除不必要的.NET, Android NDK, Haskell, CodeQL运行库，清理空间且不阻塞后续步骤运行
           sudo rm -rf /usr/share/dotnet &
