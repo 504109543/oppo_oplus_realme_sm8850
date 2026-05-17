@@ -352,7 +352,74 @@ jobs:
           else
             echo "已选择无内置KernelSU模式，跳过KernelSU配置..."
           fi
+          
+      - name: 修复 SukiSU-Ultra 6.12 编译兼容问题
+        if: ${{ github.event.inputs.ksu_type == 'sukisu' }}
+        run: |
+          cd kernel_workspace/common
 
+          echo "修复 sulog/event.c 的 USER_ARG_NULL 参数类型..."
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/kernelsu/sulog/event.c")
+          if not p.exists():
+              raise SystemExit("找不到 drivers/kernelsu/sulog/event.c")
+
+          s = p.read_text()
+
+          s = s.replace(
+              "#define USER_ARG_NULL ((struct user_arg_ptr){ 0 })",
+              "#define USER_ARG_NULL (&(struct user_arg_ptr){ 0 })"
+          )
+
+          p.write_text(s)
+          PY
+
+          echo "修复 hook/lsm_hook.c 的 security_add_hooks 参数..."
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/kernelsu/hook/lsm_hook.c")
+          if not p.exists():
+              raise SystemExit("找不到 drivers/kernelsu/hook/lsm_hook.c")
+
+          s = p.read_text()
+
+          # Linux 6.12 的 security_add_hooks 第三个参数需要 struct lsm_id *
+          if "#include <uapi/linux/lsm.h>" not in s:
+              if "#include <linux/lsm_hooks.h>" in s:
+                  s = s.replace(
+                      "#include <linux/lsm_hooks.h>",
+                      "#include <linux/lsm_hooks.h>\n#include <uapi/linux/lsm.h>"
+                  )
+              else:
+                  s = "#include <uapi/linux/lsm.h>\n" + s
+
+          marker = "static struct security_hook_list ksu_hooks[]"
+          if "static const struct lsm_id ksu_lsmid" not in s:
+              if marker not in s:
+                  raise SystemExit("找不到 ksu_hooks 定义位置")
+              s = s.replace(
+                  marker,
+                  'static const struct lsm_id ksu_lsmid = {\n'
+                  '    .name = "ksu",\n'
+                  '    .id = LSM_ID_UNDEF,\n'
+                  '};\n\n' + marker
+              )
+
+          s = s.replace(
+              'security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");',
+              'security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), &ksu_lsmid);'
+          )
+
+          p.write_text(s)
+          PY
+
+          echo "检查修复结果："
+          grep -n "USER_ARG_NULL" drivers/kernelsu/sulog/event.c || true
+          grep -n "ksu_lsmid\|security_add_hooks" drivers/kernelsu/hook/lsm_hook.c || true
+          
       - name: 应用 KernelSU & SUSFS 补丁
         if: inputs.susfs_enable
         run: |
