@@ -443,6 +443,88 @@ jobs:
             patch -p1 < 10_enable_susfs_for_ksu.patch || true
           fi
           
+      - name: 修复 SukiSU-Ultra + SUSFS 6.12 链接符号
+        if: ${{ github.event.inputs.ksu_type == 'sukisu' && github.event.inputs.susfs_enable == 'true' }}
+        run: |
+          cd kernel_workspace/common
+
+          echo "修复 SukiSU static_key 缺失符号..."
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("drivers/kernelsu/ksu.c")
+          if not p.exists():
+              raise SystemExit("找不到 drivers/kernelsu/ksu.c")
+
+          s = p.read_text()
+
+          block = r'''
+          /*
+           * Temporary compatibility fix for SukiSU-Ultra builtin + SUSFS on Linux 6.12.
+           * Some manual-hook static keys are referenced by patched kernel code but not
+           * defined by current builtin branch, causing vmlinux link errors.
+           */
+          #if defined(CONFIG_KSU_SUSFS) && defined(KSU_COMPAT_USE_STATIC_KEY)
+          #include <linux/jump_label.h>
+
+          DEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false);
+          DEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);
+          DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);
+          DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);
+          #endif
+          '''
+
+          if "ksu_input_hook_key_false" not in s or "ksu_is_input_hook_enabled" not in s:
+              s += "\n" + block + "\n"
+
+          p.write_text(s)
+          PY
+
+          echo "修复 SELinux hide 相关缺失符号..."
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path("security/selinux/selinuxfs.c")
+          if not p.exists():
+              raise SystemExit("找不到 security/selinux/selinuxfs.c")
+
+          s = p.read_text()
+
+          # 1. 当前 SUSFS patch 引用了 ksu_selinux_hide_running，但 SukiSU builtin 没有提供定义。
+          if "bool ksu_selinux_hide_running" not in s and "int ksu_selinux_hide_running" not in s:
+              insert = '''
+          /*
+           * Temporary compatibility fix for SukiSU-Ultra builtin + SUSFS on Linux 6.12.
+           * Keep SELinux hide disabled by default when the external symbol is missing.
+           */
+          bool ksu_selinux_hide_running = false;
+          '''
+              # 放在 include 后面，避免插到函数中间
+              last_include = 0
+              lines = s.splitlines()
+              for i, line in enumerate(lines):
+                  if line.startswith("#include "):
+                      last_include = i + 1
+              lines.insert(last_include, insert)
+              s = "\n".join(lines) + "\n"
+
+          # 2. 部分内核没有 *_with_policy 这些 SELinux helper，先退回普通 helper，保证能链接。
+          replacements = {
+              "security_context_to_sid_with_policy(backup_sepolicy, ": "security_context_to_sid(",
+              "security_sid_to_context_with_policy(backup_sepolicy, ": "security_sid_to_context(",
+              "security_compute_av_user_with_policy(backup_sepolicy, ": "security_compute_av_user(",
+          }
+
+          for old, new in replacements.items():
+              s = s.replace(old, new)
+
+          p.write_text(s)
+          PY
+
+          echo "检查修复结果："
+          grep -n "ksu_input_hook_key_false\|ksu_init_rc_hook_key_false\|ksu_is_input_hook_enabled\|ksu_is_init_rc_hook_enabled" drivers/kernelsu/ksu.c || true
+          grep -n "ksu_selinux_hide_running\|with_policy\|backup_sepolicy" security/selinux/selinuxfs.c || true    
+          
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
         run: |
