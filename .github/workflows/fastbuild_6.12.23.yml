@@ -461,28 +461,25 @@ jobs:
           block = r'''
           /*
            * Temporary compatibility fix for SukiSU-Ultra builtin + SUSFS on Linux 6.12.
-           * Some manual-hook static keys are referenced by patched kernel code but not
-           * defined by current builtin branch, causing vmlinux link errors.
            */
-          #if defined(CONFIG_KSU_SUSFS) && defined(KSU_COMPAT_USE_STATIC_KEY)
           #include <linux/jump_label.h>
 
           DEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false);
           DEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);
           DEFINE_STATIC_KEY_FALSE(ksu_is_input_hook_enabled);
           DEFINE_STATIC_KEY_FALSE(ksu_is_init_rc_hook_enabled);
-          #endif
           '''
 
-          if "ksu_input_hook_key_false" not in s or "ksu_is_input_hook_enabled" not in s:
+          if "DEFINE_STATIC_KEY_FALSE(ksu_input_hook_key_false)" not in s:
               s += "\n" + block + "\n"
 
           p.write_text(s)
           PY
 
-          echo "修复 SELinux hide 相关缺失符号..."
+          echo "修复 SELinux hide 缺失变量..."
           python3 <<'PY'
           from pathlib import Path
+          import re
 
           p = Path("security/selinux/selinuxfs.c")
           if not p.exists():
@@ -490,74 +487,104 @@ jobs:
 
           s = p.read_text()
 
-          # 1. 当前 SUSFS patch 引用了 ksu_selinux_hide_running，但 SukiSU builtin 没有提供定义。
-          if "bool ksu_selinux_hide_running" not in s and "int ksu_selinux_hide_running" not in s:
-              insert = '''
-          /*
-           * Temporary compatibility fix for SukiSU-Ultra builtin + SUSFS on Linux 6.12.
-           * Keep SELinux hide disabled by default when the external symbol is missing.
-           */
-          bool ksu_selinux_hide_running = false;
-          '''
-              # 放在 include 后面，避免插到函数中间
-              last_include = 0
+          # 注意：即使文件里有 extern bool ksu_selinux_hide_running;
+          # 也仍然需要一个真正的全局定义，否则链接阶段 undefined symbol。
+          if "bool ksu_selinux_hide_running = false;" not in s:
               lines = s.splitlines()
+              last_include = 0
               for i, line in enumerate(lines):
                   if line.startswith("#include "):
                       last_include = i + 1
-              lines.insert(last_include, insert)
+
+              lines.insert(
+                  last_include,
+                  "\n/* Temporary fix for missing SukiSU SELinux hide state symbol. */\n"
+                  "bool ksu_selinux_hide_running = false;\n"
+              )
               s = "\n".join(lines) + "\n"
 
-          # 2. 部分内核没有 *_with_policy 这些 SELinux helper，先退回普通 helper，保证能链接。
-          # 2. 部分内核没有 *_with_policy 这些 SELinux helper，退回普通 helper。
-          # 注意：普通 security_context_to_sid() 只有 4 个参数，没有 SECSID_NULL 参数。
-          s = s.replace(
-              "security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL)",
-              "security_context_to_sid(buf, size, &sid, GFP_KERNEL)"
+          p.write_text(s)
+          PY
+
+          echo "修复 security/selinux/selinuxfs.c 里的 with_policy 调用..."
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("security/selinux/selinuxfs.c")
+          s = p.read_text()
+
+          # security_context_to_sid_with_policy(backup_sepolicy, a, b, c, SECSID_NULL, GFP_KERNEL)
+          # -> security_context_to_sid(a, b, c, GFP_KERNEL)
+          s = re.sub(
+              r"security_context_to_sid_with_policy\s*\(\s*backup_sepolicy\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*SECSID_NULL\s*,\s*GFP_KERNEL\s*\)",
+              r"security_context_to_sid(\1, \2, \3, GFP_KERNEL)",
+              s
           )
-          
-          s = s.replace(
-              "security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL)",
-              "security_context_to_sid(scon, strlen(scon), &ssid, GFP_KERNEL)"
+
+          # 防止上一次已经错误替换成 5 参数版本
+          s = re.sub(
+              r"security_context_to_sid\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*SECSID_NULL\s*,\s*GFP_KERNEL\s*\)",
+              r"security_context_to_sid(\1, \2, \3, GFP_KERNEL)",
+              s
           )
-          
-          s = s.replace(
-              "security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL)",
-              "security_context_to_sid(tcon, strlen(tcon), &tsid, GFP_KERNEL)"
+
+          # security_sid_to_context_with_policy(backup_sepolicy, sid, &context, &len)
+          # -> security_sid_to_context(sid, &context, &len)
+          s = re.sub(
+              r"security_sid_to_context_with_policy\s*\(\s*backup_sepolicy\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+              r"security_sid_to_context(\1, \2, \3)",
+              s
           )
-          
-          s = s.replace(
-              "security_sid_to_context_with_policy(backup_sepolicy, sid, &context, &len)",
-              "security_sid_to_context(sid, &context, &len)"
-          )
-          
-          s = s.replace(
-              "security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, req, &avd)",
-              "security_compute_av_user(ssid, tsid, tclass, req, &avd)"
-          )
-          
-          # 如果前一次补丁已经把 with_policy 改掉了，但留下了多余的 SECSID_NULL，这里再清理一次。
-          s = s.replace(
-              "security_context_to_sid(buf, size, &sid, SECSID_NULL, GFP_KERNEL)",
-              "security_context_to_sid(buf, size, &sid, GFP_KERNEL)"
-          )
-          
-          s = s.replace(
-              "security_context_to_sid(scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL)",
-              "security_context_to_sid(scon, strlen(scon), &ssid, GFP_KERNEL)"
-          )
-          
-          s = s.replace(
-              "security_context_to_sid(tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL)",
-              "security_context_to_sid(tcon, strlen(tcon), &tsid, GFP_KERNEL)"
+
+          # security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, req, &avd)
+          # -> security_compute_av_user(ssid, tsid, tclass, req, &avd)
+          s = re.sub(
+              r"security_compute_av_user_with_policy\s*\(\s*backup_sepolicy\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\)",
+              r"security_compute_av_user(\1, \2, \3, \4, \5)",
+              s
           )
 
           p.write_text(s)
           PY
 
-          echo "检查修复结果："
-          grep -n "ksu_input_hook_key_false\|ksu_init_rc_hook_key_false\|ksu_is_input_hook_enabled\|ksu_is_init_rc_hook_enabled" drivers/kernelsu/ksu.c || true
-          grep -n "ksu_selinux_hide_running\|with_policy\|backup_sepolicy" security/selinux/selinuxfs.c || true    
+          echo "修复 security/selinux/hooks.c 里的 with_policy 调用..."
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("security/selinux/hooks.c")
+          if not p.exists():
+              raise SystemExit("找不到 security/selinux/hooks.c")
+
+          s = p.read_text()
+
+          # security_context_to_sid_with_policy(backup_sepolicy, xxx, yyy, zzz, SECSID_NULL, GFP_KERNEL)
+          # -> security_context_to_sid(xxx, yyy, zzz, GFP_KERNEL)
+          s = re.sub(
+              r"security_context_to_sid_with_policy\s*\(\s*backup_sepolicy\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*SECSID_NULL\s*,\s*GFP_KERNEL\s*\)",
+              r"security_context_to_sid(\1, \2, \3, GFP_KERNEL)",
+              s
+          )
+
+          # 防止已经被错误替换过但还留着 SECSID_NULL
+          s = re.sub(
+              r"security_context_to_sid\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*SECSID_NULL\s*,\s*GFP_KERNEL\s*\)",
+              r"security_context_to_sid(\1, \2, \3, GFP_KERNEL)",
+              s
+          )
+
+          p.write_text(s)
+          PY
+
+          echo "检查是否还残留 with_policy / backup_sepolicy："
+          grep -RIn "with_policy\|backup_sepolicy" security/selinux || true
+
+          echo "检查 ksu_selinux_hide_running 定义："
+          grep -RIn "ksu_selinux_hide_running" security/selinux || true
+
+          echo "检查 static_key 定义："
+          grep -RIn "DEFINE_STATIC_KEY_FALSE(ksu_.*hook" drivers/kernelsu || true
           
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
         if: inputs.lz4_enable
