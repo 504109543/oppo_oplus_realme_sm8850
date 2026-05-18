@@ -509,14 +509,48 @@ jobs:
               s = "\n".join(lines) + "\n"
 
           # 2. 部分内核没有 *_with_policy 这些 SELinux helper，先退回普通 helper，保证能链接。
-          replacements = {
-              "security_context_to_sid_with_policy(backup_sepolicy, ": "security_context_to_sid(",
-              "security_sid_to_context_with_policy(backup_sepolicy, ": "security_sid_to_context(",
-              "security_compute_av_user_with_policy(backup_sepolicy, ": "security_compute_av_user(",
-          }
-
-          for old, new in replacements.items():
-              s = s.replace(old, new)
+          # 2. 部分内核没有 *_with_policy 这些 SELinux helper，退回普通 helper。
+          # 注意：普通 security_context_to_sid() 只有 4 个参数，没有 SECSID_NULL 参数。
+          s = s.replace(
+              "security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL)",
+              "security_context_to_sid(buf, size, &sid, GFP_KERNEL)"
+          )
+          
+          s = s.replace(
+              "security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL)",
+              "security_context_to_sid(scon, strlen(scon), &ssid, GFP_KERNEL)"
+          )
+          
+          s = s.replace(
+              "security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL)",
+              "security_context_to_sid(tcon, strlen(tcon), &tsid, GFP_KERNEL)"
+          )
+          
+          s = s.replace(
+              "security_sid_to_context_with_policy(backup_sepolicy, sid, &context, &len)",
+              "security_sid_to_context(sid, &context, &len)"
+          )
+          
+          s = s.replace(
+              "security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, req, &avd)",
+              "security_compute_av_user(ssid, tsid, tclass, req, &avd)"
+          )
+          
+          # 如果前一次补丁已经把 with_policy 改掉了，但留下了多余的 SECSID_NULL，这里再清理一次。
+          s = s.replace(
+              "security_context_to_sid(buf, size, &sid, SECSID_NULL, GFP_KERNEL)",
+              "security_context_to_sid(buf, size, &sid, GFP_KERNEL)"
+          )
+          
+          s = s.replace(
+              "security_context_to_sid(scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL)",
+              "security_context_to_sid(scon, strlen(scon), &ssid, GFP_KERNEL)"
+          )
+          
+          s = s.replace(
+              "security_context_to_sid(tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL)",
+              "security_context_to_sid(tcon, strlen(tcon), &tsid, GFP_KERNEL)"
+          )
 
           p.write_text(s)
           PY
