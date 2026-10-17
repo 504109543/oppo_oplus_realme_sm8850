@@ -289,6 +289,10 @@ jobs:
             # GKI O=out 的 src 已包含 srctree；避免上游再次拼接导致 ../ 重复。
             printf '\n# GKI O=out: resolved KernelSU Next headers\nccflags-y += -I%s\n' "$KSU_INCLUDE_DIR" >> Kbuild
             grep -F -- "ccflags-y += -I$KSU_INCLUDE_DIR" Kbuild
+            # GKI 6.12 的 task_pid_nr() 声明在 linux/pid.h，不能依赖间接包含。
+            if ! grep -Fxq '#include <linux/pid.h>' compat/samsung_kdp.c; then
+              sed -i '/^#include <linux\/cred.h>$/a #include <linux/pid.h>' compat/samsung_kdp.c
+            fi
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/other_patch/apk_sign.patch
             # 上游已将 apk_sign.c 移至 manager/，仅转换此 Workflow 使用的补丁路径。
             sed -i 's@a/kernel/apk_sign.c@a/kernel/manager/apk_sign.c@g; s@b/kernel/apk_sign.c@b/kernel/manager/apk_sign.c@g' apk_sign.patch
