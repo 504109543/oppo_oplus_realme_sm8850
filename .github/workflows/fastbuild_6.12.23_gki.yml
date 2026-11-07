@@ -280,6 +280,8 @@ jobs:
             # SUSFS v2.3.0 lacks the optional priority UID API; retain it when provided by newer headers.
             sed -i 's/^#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER$/#if defined(CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER) \&\& defined(CMD_SUSFS_SET_PRIORITY_UID_FILTER)/' \
               kernel/supercall/dispatch.c kernel/manager/pkg_observer.c
+            # Only enable optional AVC type bookkeeping when the SUSFS provider implements it.
+            sed -i '/^#ifdef CONFIG_KSU_SUSFS$/{N; /susfs_add_sus_/s/#ifdef CONFIG_KSU_SUSFS/#if defined(CONFIG_KSU_SUSFS) \&\& defined(KSU_SUSFS_HAS_AVC_TYPE_API)/;}' kernel/selinux/sepolicy.c
             rm -rf .git
             KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
@@ -324,6 +326,15 @@ jobs:
             cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
             cd ./KernelSU
             patch -p1 -F 3 < 10_enable_susfs_for_ksu.patch || true
+          fi
+          if [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+            if grep -Eq '^[[:space:]]*int[[:space:]]+susfs_add_sus_type[[:space:]]*[(]' common/fs/susfs.c &&
+               grep -Eq '^[[:space:]]*int[[:space:]]+susfs_add_sus_avd_allowed_by_type[[:space:]]*[(]' common/fs/susfs.c; then
+              echo 'ccflags-y += -DKSU_SUSFS_HAS_AVC_TYPE_API' >> KernelSU-Next/kernel/Kbuild
+              echo "SUSFS AVC type helpers: available"
+            else
+              echo "SUSFS AVC type helpers: absent; retaining the provider's existing AVC implementation"
+            fi
           fi
           
       - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
