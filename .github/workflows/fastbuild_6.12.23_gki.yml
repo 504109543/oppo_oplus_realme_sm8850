@@ -269,6 +269,14 @@ jobs:
             echo "正在配置KernelSU Next..."
             curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
             cd KernelSU-Next
+            git log -1 --format='KernelSU-Next source: %H'
+            test "$(realpath ../common/drivers/kernelsu)" = "$(realpath kernel)"
+            for header in ksu_samsung_kdp.h uapi/app_profile.h klog.h; do
+              test -f "kernel/include/$header"
+            done
+            # Fix KernelSU-Next include path for O=out builds (src already contains srctree).
+            grep -Fxq 'KSU_KERNEL_DIR := $(srctree)/$(src)' kernel/Kbuild
+            sed -i 's@KSU_KERNEL_DIR := $(srctree)/$(src)@KSU_KERNEL_DIR := $(realpath $(srctree)/drivers/kernelsu)@' kernel/Kbuild
             rm -rf .git
             KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=dev&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
@@ -690,6 +698,21 @@ jobs:
           echo "编译后空间:"
           df -h
 
+      - name: 验证 KernelSU Next 构建
+        if: inputs.ksu_type == 'ksunext'
+        run: |
+          cd kernel_workspace/common
+          grep -Fx 'CONFIG_KSU=y' out/.config
+          if [[ "${{ inputs.susfs_enable }}" == "true" ]]; then
+            grep -Fx 'CONFIG_KSU_SUSFS=y' out/.config
+            grep '^#define SUSFS_VERSION' include/linux/susfs.h
+          fi
+          KSU_KERNEL_DIR="$(realpath drivers/kernelsu)"
+          for object in compat/samsung_kdp compat/samsung_defex policy/allowlist; do
+            grep -Fq -- "-I$KSU_KERNEL_DIR/include " "out/drivers/kernelsu/${object%/*}/.${object##*/}.o.cmd"
+            echo "Verified $object.o include path: $KSU_KERNEL_DIR/include"
+          done
+
       - name: 保存新的 ccache 缓存
         if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
@@ -790,6 +813,7 @@ jobs:
           archive: false
 
   release:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
